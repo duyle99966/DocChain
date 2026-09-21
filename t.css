@@ -466,22 +466,41 @@ code {
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
 /* ---------- Vùng dựng PDF (ẩn khỏi màn hình nhưng vẫn render được) ----------
-   Mọi selector đặt trực tiếp dưới .pdf-page vì html2pdf clone phần tử ra ngoài .pdf-stage. */
-.pdf-stage { position: fixed; top: 0; left: -12000px; width: 170mm; background: #fff; pointer-events: none; }
+   Mọi selector đặt trực tiếp dưới .pdf-page vì html2pdf clone phần tử ra ngoài .pdf-stage.
+   Bọc .pdf-stage trong .pdf-clip (kích thước 0, overflow hidden) thay vì đẩy ra xa bằng
+   left âm hàng chục nghìn px: cách đẩy ra xa từng khiến html2canvas dựng thiếu/trống nội
+   dung ở một số trình duyệt vì phần tử nằm ngoài vùng toạ độ mà engine tính layout. */
+.pdf-clip { position: fixed; top: 0; left: 0; width: 0; height: 0; overflow: hidden; pointer-events: none; }
+.pdf-stage { position: absolute; top: 0; left: 0; width: 170mm; background: #fff; }
 .pdf-page {
   width: 170mm; background: #fff; color: #000;
   font-family: "Times New Roman", "Liberation Serif", Times, serif;
   font-size: 12pt; line-height: 1.5;
   overflow-wrap: anywhere;
+  word-break: break-word;
+  box-sizing: border-box;
 }
+.pdf-page * { box-sizing: border-box; max-width: 100%; }
 .pdf-page p { margin: 0 0 6pt; }
 .pdf-page h1, .pdf-page h2, .pdf-page h3, .pdf-page h4, .pdf-page h5, .pdf-page h6 { margin: 10pt 0 6pt; line-height: 1.3; }
 .pdf-page h1 { font-size: 18pt; } .pdf-page h2 { font-size: 16pt; } .pdf-page h3 { font-size: 14pt; }
 .pdf-page ul, .pdf-page ol { margin: 0 0 6pt; padding-left: 24pt; }
-.pdf-page table { width: 100%; border-collapse: collapse; margin: 6pt 0; }
-.pdf-page td, .pdf-page th { border: 1px solid #000; padding: 3pt 5pt; vertical-align: top; }
-.pdf-page img { max-width: 100%; height: auto; }
-.pdf-page a { color: #000; text-decoration: underline; }
+/* table-layout: fixed buộc cột phải chia đều trong 170mm dù ô có chuỗi dài không dấu cách
+   (số hồ sơ, URL...), tránh bảng bị đẩy tràn ra ngoài lề PDF. */
+.pdf-page table { width: 100% !important; table-layout: fixed; border-collapse: collapse; margin: 6pt 0; }
+.pdf-page td, .pdf-page th {
+  border: 1px solid #000; padding: 3pt 5pt; vertical-align: top;
+  overflow-wrap: anywhere; word-break: break-word; white-space: normal;
+}
+.pdf-page img { max-width: 100% !important; height: auto !important; }
+.pdf-page a { color: #000; text-decoration: underline; word-break: break-all; }
+/* Không cắt giữa dòng/ô/ảnh/tiêu đề khi html2pdf chia trang, để viền bảng và nội dung
+   không bị "vỡ" ở mép trang. */
+.pdf-page tr, .pdf-page img, .pdf-page li,
+.pdf-page h1, .pdf-page h2, .pdf-page h3, .pdf-page h4, .pdf-page h5, .pdf-page h6 {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
 /* html2pdf tự tạo lớp phủ khi chụp: làm nó trong suốt để không nháy màn hình */
 .html2pdf__overlay { opacity: 0 !important; pointer-events: none !important; }
 

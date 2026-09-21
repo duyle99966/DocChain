@@ -13,7 +13,8 @@
     concurrency: 3,                        // tối đa 3 file Word chuyển cùng lúc
     warnTotalBytes: 300 * 1024 * 1024,     // cảnh báo khi tổng dung lượng > 300MB
     multiDownloadDelay: 400,               // ms giữa các lần tải khi tải nhiều PDF riêng lẻ
-    maxCanvasHeight: 30000,                // px: giới hạn chiều cao canvas an toàn của trình duyệt
+    maxCanvasHeight: 16000,                // px: giới hạn chiều cao canvas an toàn (chung cho hầu hết trình duyệt, kể cả mobile)
+    minScale: 0.35,                        // scale nhỏ nhất khi phải thu nhỏ tài liệu rất dài để không bị cắt/trống trang
     convertTimeout: 180000,                // ms: quá thời gian này coi là lỗi
     logLimit: 600,                         // số dòng log tối đa
     // Bộ giải nén RAR (node-unrar-js, chạy bằng WebAssembly). Chỉ tải khi người dùng thả file .rar.
@@ -582,35 +583,58 @@
     if (!result.value || !result.value.trim()) throw new Error('Tài liệu trống hoặc không đọc được nội dung');
 
     // Bước 2: dựng HTML vào trang A4 ẩn (Times New Roman, lề 2cm do html2pdf thêm vào)
-    const stage = h('div', { class: 'pdf-stage', 'aria-hidden': 'true' });
+    const clip = h('div', { class: 'pdf-clip', 'aria-hidden': 'true' });
+    const stage = h('div', { class: 'pdf-stage' });
     const page = h('div', { class: 'pdf-page' });
     page.innerHTML = result.value;
     stage.append(page);
-    document.body.append(stage);
+    clip.append(stage);
+    document.body.append(clip);
 
     try {
+      // Mammoth chủ động không giữ căn lề/thụt đầu dòng trực tiếp (chỉ giữ style đặt tên
+      // như Heading, Bold...). Đọc lại word/document.xml trong chính file .docx để lấy căn
+      // lề (w:jc) và thụt lề (w:ind) từng đoạn rồi gán lại, khớp theo đúng thứ tự đoạn văn.
+      try {
+        const formats = await extractParagraphFormats(arrayBuffer);
+        applyParagraphFormatting(page, formats);
+      } catch (fmtErr) {
+        log(`Không khôi phục được căn lề gốc của "${name}": ${fmtErr.message}`, 'warn');
+      }
+
       await waitForImages(page);
       if (document.fonts && document.fonts.ready) await document.fonts.ready;
 
-      // Tài liệu dài -> giảm scale để canvas không vượt giới hạn của trình duyệt
+      // Tài liệu dài -> giảm scale để tổng chiều cao canvas (height * scale) không vượt giới hạn
+      // an toàn của trình duyệt. TRƯỚC ĐÂY scale luôn bị ép về tối thiểu 1 (Math.max(1, ...)),
+      // nên tài liệu dài vẫn tạo canvas vượt giới hạn -> PDF bị thiếu nội dung/trống trang ở
+      // cuối. Giờ cho phép scale nhỏ hơn 1 để toàn bộ nội dung luôn được dựng đầy đủ.
       const height = Math.max(page.scrollHeight, 1);
-      const scale = Math.max(1, Math.min(2, CONFIG.maxCanvasHeight / height));
-      if (height > CONFIG.maxCanvasHeight) {
-        log(`"${name}" rất dài, các trang cuối có thể bị thiếu hoặc trống`, 'warn');
+      const rawScale = CONFIG.maxCanvasHeight / height;
+      const scale = Math.max(CONFIG.minScale, Math.min(2, rawScale));
+      if (rawScale < CONFIG.minScale) {
+        log(`"${name}" rất dài (${Math.round(height)}px), buộc dùng scale tối thiểu ${CONFIG.minScale} nên chữ trong PDF có thể nét kém hơn bình thường`, 'warn');
+      } else if (scale < 1) {
+        log(`"${name}" khá dài, tự động giảm scale xuống ${scale.toFixed(2)} để không bị thiếu/trống trang`, 'warn');
       }
 
       // Bước 3: HTML -> PDF A4, lề 20mm mỗi cạnh
+      // Dùng PNG (ảnh không nén mất dữ liệu) thay vì JPEG: JPEG từng làm viền bảng/đường kẻ
+      // mảnh 1px bị nhoè hoặc "biến mất" ở đúng mép cắt trang do nén ảnh.
       const worker = html2pdf().set({
         margin: [20, 20, 20, 20],
-        image: { type: 'jpeg', quality: 0.92 },
+        image: { type: 'png' },
         html2canvas: { scale, useCORS: true, logging: false, backgroundColor: '#ffffff' },
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait', compress: true },
-        pagebreak: { mode: ['css', 'legacy'], avoid: ['tr', 'img', 'h1', 'h2', 'h3'] }
+        pagebreak: {
+          mode: ['css', 'legacy'],
+          avoid: ['tr', 'td', 'th', 'table', 'img', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']
+        }
       }).from(page).outputPdf('blob');
 
       return await withTimeout(worker, CONFIG.convertTimeout, 'Chuyển đổi quá lâu, đã hủy');
     } finally {
-      stage.remove();   // luôn dọn vùng dựng, kể cả khi lỗi
+      clip.remove();   // luôn dọn vùng dựng, kể cả khi lỗi
     }
   }
 
@@ -619,6 +643,73 @@
       .filter(img => !img.complete)
       .map(img => new Promise(resolve => { img.onload = img.onerror = resolve; }));
     return Promise.all(pending);
+  }
+
+  /**
+   * Đọc word/document.xml bên trong .docx (chính .docx cũng là 1 file zip) để lấy căn lề
+   * (w:jc) và thụt lề (w:ind) của từng đoạn văn <w:p>, theo đúng thứ tự xuất hiện trong tài
+   * liệu (kể cả đoạn văn nằm trong bảng). Đây là định dạng trực tiếp (direct formatting) mà
+   * Mammoth.js chủ ý bỏ qua vì thư viện chỉ ánh xạ style có tên (Heading, List...), không giữ
+   * định dạng trực tiếp trên từng đoạn. Trả về mảng rỗng nếu không đọc được, để không làm hỏng
+   * luồng chuyển đổi chính.
+   */
+  async function extractParagraphFormats(arrayBuffer) {
+    try {
+      const zip = await JSZip.loadAsync(arrayBuffer);
+      const docXml = zip.file('word/document.xml');
+      if (!docXml) return [];
+      const xmlText = await docXml.async('text');
+      const xml = new DOMParser().parseFromString(xmlText, 'application/xml');
+      if (xml.getElementsByTagName('parsererror').length) return [];
+
+      const paragraphs = [...xml.getElementsByTagName('w:p')];
+      return paragraphs.map(p => {
+        const pPr = firstChild(p, 'w:pPr');
+        const jc = pPr && firstChild(pPr, 'w:jc');
+        const ind = pPr && firstChild(pPr, 'w:ind');
+        const align = mapAlignValue(jc && (jc.getAttribute('w:val') || jc.getAttribute('val')));
+
+        let indentLeftPt = 0, indentFirstPt = 0;
+        if (ind) {
+          const left = ind.getAttribute('w:left') || ind.getAttribute('w:start') || ind.getAttribute('left') || ind.getAttribute('start');
+          const firstLine = ind.getAttribute('w:firstLine') || ind.getAttribute('firstLine');
+          const hanging = ind.getAttribute('w:hanging') || ind.getAttribute('hanging');
+          if (left && !Number.isNaN(Number(left))) indentLeftPt = Number(left) / 20;   // twip -> pt
+          if (firstLine && !Number.isNaN(Number(firstLine))) indentFirstPt = Number(firstLine) / 20;
+          else if (hanging && !Number.isNaN(Number(hanging))) indentFirstPt = -Number(hanging) / 20;
+        }
+        return { align, indentLeftPt, indentFirstPt };
+      });
+    } catch (_) {
+      return [];   // không đọc được thì bỏ qua, PDF vẫn tạo được bình thường (chỉ thiếu căn lề)
+    }
+  }
+
+  const firstChild = (el, tagName) => el.getElementsByTagName(tagName)[0] || null;
+
+  function mapAlignValue(val) {
+    switch (val) {
+      case 'center': return 'center';
+      case 'right': case 'end': return 'right';
+      case 'both': case 'distribute': return 'justify';
+      default: return '';   // 'left' / 'start' / không có: giữ mặc định, không cần ép
+    }
+  }
+
+  /** Gán lại căn lề/thụt lề theo đúng thứ tự đoạn văn mà Mammoth đã tạo ra. */
+  function applyParagraphFormatting(page, formats) {
+    if (!formats.length) return;
+    const candidates = [...page.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li')];
+    const n = Math.min(candidates.length, formats.length);
+    for (let i = 0; i < n; i++) {
+      const el = candidates[i];
+      const f = formats[i];
+      if (f.align) el.style.textAlign = f.align;
+      if (el.tagName === 'P') {
+        if (f.indentLeftPt) el.style.marginLeft = `${Math.max(0, f.indentLeftPt)}pt`;
+        if (f.indentFirstPt) el.style.textIndent = `${f.indentFirstPt}pt`;
+      }
+    }
   }
 
   /* ---------------------------------------------------------
