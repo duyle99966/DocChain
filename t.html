@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocChain – Giải nén ZIP và chuyển Word sang PDF</title>
+  <meta name="description" content="Tải lên file ZIP, tự giải nén và chuyển toàn bộ file Word (.docx) sang PDF ngay trên trình duyệt. File không rời khỏi máy của bạn.">
+  <meta name="theme-color" content="#0B0F1A">
+
+  <!-- Font: Inter (giao diện) + JetBrains Mono (hash, log, số liệu) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="t.css">
+</head>
+<body>
+  <!-- Nền: lưới mờ + các đốm sáng gradient -->
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-glow bg-glow--violet" aria-hidden="true"></div>
+  <div class="bg-glow bg-glow--cyan" aria-hidden="true"></div>
+  <div class="bg-glow bg-glow--green" aria-hidden="true"></div>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="#" aria-label="DocChain">
+        <svg class="brand-mark" viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+          <defs>
+            <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#7C3AED"/>
+              <stop offset="0.55" stop-color="#22D3EE"/>
+              <stop offset="1" stop-color="#34D399"/>
+            </linearGradient>
+          </defs>
+          <path d="M16 2.5 28 9.25v13.5L16 29.5 4 22.75V9.25L16 2.5Z" fill="none" stroke="url(#brandGrad)" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M4.5 9.5 16 16l11.5-6.5M16 16v13" fill="none" stroke="url(#brandGrad)" stroke-width="1.6" stroke-linejoin="round" opacity=".7"/>
+        </svg>
+        <span class="brand-name">DocChain</span>
+      </a>
+      <div class="badge-status" role="note">
+        <span class="pulse-dot" aria-hidden="true"></span>
+        Client-side • Files never leave your device
+      </div>
+    </div>
+  </header>
+
+  <main class="container main">
+    <section class="hero">
+      <h1>Thả file ZIP vào, nhận lại toàn bộ tài liệu Word dưới dạng PDF</h1>
+      <p>Mỗi file ZIP là một block riêng: hệ thống tự giải nén, chuyển từng file .docx sang PDF khổ A4, rồi để bạn chọn cách nhận kết quả.</p>
+    </section>
+
+    <div id="lib-warning" class="alert alert-error" role="alert" hidden></div>
+
+    <!-- Thanh pipeline: Upload -> Extract -> Convert -> Download -->
+    <ol class="pipeline" aria-label="Tiến trình xử lý">
+      <li class="step is-active" data-step="upload">
+        <span class="step-node">
+          <span class="step-num">1</span>
+          <svg class="step-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="step-label">Upload</span>
+      </li>
+      <li class="step" data-step="extract">
+        <span class="step-node">
+          <span class="step-num">2</span>
+          <svg class="step-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="step-label">Extract</span>
+      </li>
+      <li class="step" data-step="convert">
+        <span class="step-node">
+          <span class="step-num">3</span>
+          <svg class="step-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="step-label">Convert</span>
+      </li>
+      <li class="step" data-step="download">
+        <span class="step-node">
+          <span class="step-num">4</span>
+          <svg class="step-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span class="step-label">Download</span>
+      </li>
+    </ol>
+
+    <!-- Vùng thả file -->
+    <section class="card dropzone-card" aria-label="Tải file ZIP lên">
+      <label id="dropzone" class="dropzone" for="file-input">
+        <input id="file-input" class="sr-only" type="file" accept=".zip,application/zip,application/x-zip-compressed" multiple>
+        <svg class="dropzone-icon" viewBox="0 0 48 48" width="52" height="52" aria-hidden="true">
+          <path d="M24 5 41 14.5v19L24 43 7 33.5v-19L24 5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M24 32V17m0 0-6 6m6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="dropzone-title">Thả một hoặc nhiều file .zip vào đây</span>
+        <span class="dropzone-sub">hoặc bấm để chọn từ máy. Mỗi file ZIP tạo thành một block.</span>
+        <span class="btn btn-primary dropzone-btn">Chọn file ZIP</span>
+      </label>
+    </section>
+
+    <!-- Chọn cách nhận kết quả -->
+    <fieldset class="card mode-select">
+      <legend>Cách nhận kết quả</legend>
+      <label class="mode-option">
+        <input class="sr-only" type="radio" name="dlmode" value="zip" checked>
+        <span class="mode-body">
+          <strong>Nén thành ZIP</strong>
+          <small>Mỗi ZIP gốc cho ra một file <code>tên-zip_PDF.zip</code> chứa toàn bộ PDF của lô đó.</small>
+        </span>
+      </label>
+      <label class="mode-option">
+        <input class="sr-only" type="radio" name="dlmode" value="direct">
+        <span class="mode-body">
+          <strong>PDF trực tiếp</strong>
+          <small>Tải từng file .pdf riêng lẻ, không nén. Có thể lưu thẳng vào thư mục nếu trình duyệt hỗ trợ.</small>
+        </span>
+      </label>
+      <p id="mode-hint" class="mode-hint"></p>
+    </fieldset>
+
+    <!-- Thống kê -->
+    <section class="stats" aria-label="Thống kê">
+      <div class="stat card"><span class="stat-value mono" id="stat-zips">0</span><span class="stat-label">File ZIP</span></div>
+      <div class="stat card"><span class="stat-value mono" id="stat-docs">0</span><span class="stat-label">File Word</span></div>
+      <div class="stat card"><span class="stat-value mono" id="stat-pdfs">0</span><span class="stat-label">PDF đã tạo</span></div>
+      <div class="stat card"><span class="stat-value mono" id="stat-errors">0</span><span class="stat-label">Lỗi</span></div>
+    </section>
+
+    <!-- Thanh hành động chung -->
+    <div id="actions-bar" class="actions-bar" hidden>
+      <button id="btn-download-all" class="btn btn-primary" type="button" disabled></button>
+      <button id="btn-save-folder-all" class="btn btn-ghost" type="button" hidden disabled>Lưu tất cả vào thư mục</button>
+      <button id="btn-reset" class="btn btn-danger" type="button">Làm lại / Xóa tất cả</button>
+    </div>
+
+    <!-- Chuỗi các block (mỗi ZIP = 1 block) -->
+    <section id="blocks" class="chain" aria-label="Danh sách block" aria-live="polite">
+      <div id="empty-state" class="empty-state">
+        <p class="empty-title">Chưa có block nào</p>
+        <p class="empty-sub">Thả file .zip vào khung phía trên để tạo block đầu tiên.</p>
+      </div>
+    </section>
+
+    <!-- Log dạng terminal -->
+    <section class="terminal" aria-label="Nhật ký hoạt động">
+      <div class="terminal-bar">
+        <span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="terminal-title mono">docchain.log</span>
+      </div>
+      <div id="log" class="terminal-body mono" role="log" aria-live="off"></div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-grid">
+      <div class="credits">
+        <p class="credits-title">Phát triển bởi DUT – Khoa Công nghệ thông tin</p>
+        <p class="credits-role">Founder idea &amp; Vận hành</p>
+        <p class="credits-name">Lê Văn Duy</p>
+      </div>
+      <ul class="footnotes">
+        <li>Chỉ hỗ trợ file Word .docx. File .doc đời cũ sẽ bị bỏ qua, hãy lưu lại thành .docx trước khi nén.</li>
+        <li>Mọi xử lý diễn ra ngay trên trình duyệt của bạn, không có file nào được gửi lên máy chủ.</li>
+        <li>PDF được dựng từ bản HTML của tài liệu nên bố cục có thể khác Word gốc đôi chút (căn lề, header/footer, font đặc biệt).</li>
+        <li>Công cụ sử dụng các thư viện JSZip, Mammoth.js, html2pdf.js và FileSaver.js.</li>
+      </ul>
+    </div>
+    <div class="container footer-bottom">
+      <p>© 2026 DUT – Khoa Công nghệ thông tin. Ý tưởng sáng lập và vận hành: Lê Văn Duy.</p>
+    </div>
+  </footer>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <!-- Thư viện (CDN cdnjs, phiên bản cố định) -->
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+  <!-- Logic chính (defer giữ đúng thứ tự: chạy sau các thư viện ở trên) -->
+  <script defer src="t.js"></script>
+</body>
+</html>
