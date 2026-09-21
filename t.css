@@ -336,6 +336,12 @@ code {
 .chip[data-state="converting"] { color: var(--cyan);  border-color: rgba(34, 211, 238, 0.5);  background: rgba(34, 211, 238, 0.08); }
 .chip[data-state="done"]       { color: var(--green); border-color: rgba(52, 211, 153, 0.5);  background: rgba(52, 211, 153, 0.08); }
 .chip[data-state="partial"]    { color: var(--amber); border-color: rgba(251, 191, 36, 0.5);  background: rgba(251, 191, 36, 0.08); }
+.kind {
+  padding: 1px 7px; border-radius: 6px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  color: #c4b5fd; background: rgba(124, 58, 237, 0.2);
+}
+.kind[data-kind="rar"] { color: #fdba74; background: rgba(251, 146, 60, 0.16); }
 .block-title { grid-column: 1; margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; overflow-wrap: anywhere; }
 .block-meta {
   grid-column: 1; display: flex; flex-wrap: wrap; gap: 4px 16px;

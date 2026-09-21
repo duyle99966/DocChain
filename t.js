@@ -15,7 +15,20 @@
     multiDownloadDelay: 400,               // ms giữa các lần tải khi tải nhiều PDF riêng lẻ
     maxCanvasHeight: 30000,                // px: giới hạn chiều cao canvas an toàn của trình duyệt
     convertTimeout: 180000,                // ms: quá thời gian này coi là lỗi
-    logLimit: 600                          // số dòng log tối đa
+    logLimit: 600,                         // số dòng log tối đa
+    // Bộ giải nén RAR (node-unrar-js, chạy bằng WebAssembly). Chỉ tải khi người dùng thả file .rar.
+    // Thử lần lượt từng địa chỉ cho tới khi được. Muốn tự lưu file trên host của bạn thì thêm đường dẫn vào ĐẦU danh sách.
+    rar: {
+      moduleUrls: [
+        'https://cdn.jsdelivr.net/npm/node-unrar-js@2/esm/index.esm.js',
+        'https://cdn.jsdelivr.net/npm/node-unrar-js@2/+esm',
+        'https://esm.sh/node-unrar-js@2'
+      ],
+      wasmUrls: [
+        'https://cdn.jsdelivr.net/npm/node-unrar-js@2/esm/js/unrar.wasm',
+        'https://cdn.jsdelivr.net/npm/node-unrar-js@2/dist/js/unrar.wasm'
+      ]
+    }
   };
 
   const STATUS_LABEL = { pending: 'Pending', converting: 'Converting', done: 'Done', error: 'Error' };
@@ -217,10 +230,10 @@
 
     const zips = [];
     for (const file of fileList) {
-      if (/\.zip$/i.test(file.name)) zips.push(file);
+      if (/\.(zip|rar)$/i.test(file.name)) zips.push(file);
       else {
-        log(`Từ chối "${file.name}": chỉ chấp nhận file .zip`, 'error');
-        toast(`"${file.name}" không phải file .zip nên đã bị bỏ qua.`, 'error');
+        log(`Từ chối "${file.name}": chỉ chấp nhận file .zip hoặc .rar`, 'error');
+        toast(`"${file.name}" không phải file .zip hoặc .rar nên đã bị bỏ qua.`, 'error');
       }
     }
     if (!zips.length) return;
@@ -245,7 +258,7 @@
     refreshActions();
     try {
       setPipeline(0);
-      log(`Đã nhận ${files.length} file .zip, bắt đầu xử lý`);
+      log(`Đã nhận ${files.length} file nén (.zip/.rar), bắt đầu xử lý`);
 
       // --- Bước 2: giải nén tất cả zip trước để danh sách file hiện ra ngay ---
       setPipeline(1);
@@ -254,18 +267,18 @@
         if (epoch !== state.epoch) return;
         log(`Giải nén "${file.name}" (${formatBytes(file.size)})...`);
         try {
-          const batch = await extractZip(file);
+          const batch = await extractArchive(file);
           if (epoch !== state.epoch) return;
           if (batch) {
             state.batches.push(batch);
             renderBlock(batch);
             fresh.push(batch);
-            log(`Block #${pad(batch.no)} tạo xong: ${batch.entries.length} file Word, hash ${batch.hash.short}`, 'ok');
+            log(`Block #${pad(batch.no)} (${batch.kind.toUpperCase()}) tạo xong: ${batch.entries.length} file Word, hash ${batch.hash.short}`, 'ok');
           }
         } catch (err) {
           state.zipErrors++;
-          log(`Không giải nén được "${file.name}": ${friendlyZipError(err)}`, 'error');
-          toast(`Không đọc được "${file.name}": ${friendlyZipError(err)}`, 'error');
+          log(`Không giải nén được "${file.name}": ${friendlyArchiveError(err)}`, 'error');
+          toast(`Không đọc được "${file.name}": ${friendlyArchiveError(err)}`, 'error');
         }
         syncEmptyState();
         updateStats();
@@ -292,10 +305,11 @@
     }
   }
 
-  function friendlyZipError(err) {
+  function friendlyArchiveError(err) {
     const msg = String(err && err.message || err);
-    if (/encrypted/i.test(msg)) return 'file ZIP có đặt mật khẩu, chưa hỗ trợ';
-    if (/corrupt|end of central directory|signature/i.test(msg)) return 'file ZIP bị hỏng hoặc không đúng định dạng';
+    const reason = String(err && err.reason || '');
+    if (/password|encrypted/i.test(msg + ' ' + reason)) return 'file nén có đặt mật khẩu, chưa hỗ trợ';
+    if (/BAD_ARCHIVE|UNKNOWN_FORMAT|corrupt|end of central directory|signature/i.test(msg + ' ' + reason)) return 'file nén bị hỏng hoặc không đúng định dạng';
     return msg;
   }
 
@@ -304,7 +318,128 @@
   /* ---------------------------------------------------------
      7. GIẢI NÉN (Extract)
      --------------------------------------------------------- */
-  async function extractZip(file) {
+  /** Nhận diện định dạng bằng "chữ ký" đầu file (đáng tin hơn đuôi file). */
+  function detectArchiveKind(buffer, fileName) {
+    const b = new Uint8Array(buffer, 0, Math.min(8, buffer.byteLength));
+    const isRar = b.length >= 7 && b[0] === 0x52 && b[1] === 0x61 && b[2] === 0x72 && b[3] === 0x21 && b[4] === 0x1A && b[5] === 0x07;
+    const isZip = b.length >= 4 && b[0] === 0x50 && b[1] === 0x4B && [3, 5, 7].includes(b[2]) && [4, 6, 8].includes(b[3]);
+    if (isRar) return 'rar';
+    if (isZip) return 'zip';
+    return /\.rar$/i.test(fileName) ? 'rar' : 'zip';   // không nhận ra thì tin vào đuôi file
+  }
+
+  /** ZIP: trả về danh sách file (mỗi phần tử có hàm read() đọc nội dung khi cần). */
+  async function listZipFiles(buffer) {
+    const zip = await JSZip.loadAsync(buffer, { decodeFileName });
+    const list = [];
+    zip.forEach((relPath, zipObj) => {
+      if (zipObj.dir) return;
+      list.push({
+        path: relPath.normalize('NFC'),     // chuẩn hóa Unicode để tên tiếng Việt không bị tách dấu
+        size: (zipObj._data && zipObj._data.uncompressedSize) || null,
+        read: () => zipObj.async('arraybuffer')
+      });
+    });
+    return list;
+  }
+
+  /** Nạp bộ giải nén RAR (WebAssembly) đúng một lần, chỉ khi thật sự cần. */
+  let rarLibPromise = null;
+  function loadRarLib() {
+    if (!rarLibPromise) {
+      rarLibPromise = (async () => {
+        const errors = [];
+        for (const url of CONFIG.rar.moduleUrls) {
+          try {
+            const mod = await import(url);
+            const create = mod.createExtractorFromData || (mod.default && mod.default.createExtractorFromData);
+            if (typeof create !== 'function') throw new Error('không có hàm createExtractorFromData');
+            const wasmBinary = await fetchFirstBuffer(CONFIG.rar.wasmUrls);
+            return { createExtractorFromData: create, wasmBinary };
+          } catch (err) {
+            errors.push(`${url} -> ${err.message}`);
+          }
+        }
+        throw new Error('Không tải được bộ giải nén RAR. Chi tiết: ' + errors.join(' | '));
+      })().catch(err => { rarLibPromise = null; throw err; });   // cho phép thử lại lần sau
+    }
+    return rarLibPromise;
+  }
+
+  async function fetchFirstBuffer(urls) {
+    let lastError;
+    for (const url of urls) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return await res.arrayBuffer();
+      } catch (err) { lastError = err; }
+    }
+    throw lastError || new Error('không có địa chỉ WASM nào');
+  }
+
+  /**
+   * RAR: liệt kê file và giải nén sẵn các file .docx vào bộ nhớ
+   * (RAR "solid" không đọc lẻ từng file hiệu quả được như ZIP).
+   */
+  async function listRarFiles(buffer, wanted) {
+    log('Đang chuẩn bị bộ giải nén RAR (lần đầu có thể mất vài giây)...');
+    const { createExtractorFromData, wasmBinary } = await loadRarLib();
+
+    let extractor;
+    try {
+      extractor = await createExtractorFromData({ wasmBinary, data: buffer });
+    } catch (err) {
+      if (err && err.reason) throw err;   // lỗi của chính file RAR (mật khẩu, hỏng...) thì báo luôn
+      extractor = await createExtractorFromData({ wasmBinary, data: new Uint8Array(buffer) });
+    }
+
+    const headers = [...extractor.getFileList().fileHeaders].filter(hd => !hd.flags.directory);
+    const items = headers.map(hd => {
+      const item = {
+        path: String(hd.name).replace(/\\/g, '/').normalize('NFC'),
+        rawName: hd.name,
+        size: hd.unpSize != null ? Number(hd.unpSize) : null,
+        encrypted: !!hd.flags.encrypted,
+        data: null,
+        error: ''
+      };
+      item.read = async () => {
+        if (!item.data) throw new Error(item.error || 'Không có dữ liệu giải nén cho file này');
+        const bytes = item.data;
+        item.data = null;                  // trả bộ nhớ ngay sau khi đã đọc
+        return bytes.buffer;
+      };
+      return item;
+    });
+
+    const todo = items.filter(i => wanted(i.path));
+    todo.filter(i => i.encrypted).forEach(i => { i.error = 'File nằm trong RAR có mật khẩu, chưa hỗ trợ'; });
+    const readable = todo.filter(i => !i.encrypted);
+
+    if (readable.length) {
+      const byName = new Map(readable.map(i => [i.rawName, i]));
+      try {
+        const { files } = extractor.extract({ files: readable.map(i => i.rawName) });
+        for (const f of files) {
+          const item = byName.get(f.fileHeader.name);
+          const ex = f.extraction;
+          const bytes = ex && (ex.data instanceof Uint8Array ? ex.data : (ex instanceof Uint8Array ? ex : null));
+          if (item && bytes) item.data = bytes.slice();   // slice() để có bản sao độc lập với bộ nhớ WASM
+          await sleep(0);                                  // nhường trình duyệt vẽ giao diện
+        }
+      } catch (err) {
+        const msg = friendlyArchiveError(err);
+        readable.filter(i => !i.data).forEach(i => { i.error = `Không giải nén được từ RAR: ${msg}`; });
+        log(`RAR giải nén dở dang: ${msg}`, 'warn');
+      }
+      readable.filter(i => !i.data && !i.error).forEach(i => { i.error = 'RAR không trả về dữ liệu cho file này'; });
+    }
+    return items;
+  }
+
+  /** Đọc một file nén (.zip hoặc .rar) và dựng thành một block. */
+  async function extractArchive(file) {
     const buffer = await file.arrayBuffer();
     const hash = await sha256(buffer);
 
@@ -315,14 +450,15 @@
       return null;
     }
 
-    const zip = await JSZip.loadAsync(buffer, { decodeFileName });
+    const kind = detectArchiveKind(buffer, file.name);
+    const declared = /\.rar$/i.test(file.name) ? 'rar' : 'zip';
+    if (kind !== declared) {
+      log(`"${file.name}" có đuôi .${declared} nhưng thực chất là ${kind.toUpperCase()}, sẽ xử lý theo ${kind.toUpperCase()}`, 'warn');
+    }
 
-    // Lấy danh sách file, chuẩn hóa Unicode (NFC) để tên tiếng Việt không bị tách dấu
-    const files = [];
-    zip.forEach((relPath, zipObj) => {
-      if (!zipObj.dir) files.push([relPath.normalize('NFC'), zipObj]);
-    });
-    files.sort((a, b) => a[0].localeCompare(b[0], 'vi', { numeric: true }));
+    const wanted = path => !isJunk(path) && /\.docx$/i.test(path);
+    const files = kind === 'rar' ? await listRarFiles(buffer, wanted) : await listZipFiles(buffer);
+    files.sort((a, b) => a.path.localeCompare(b.path, 'vi', { numeric: true }));
 
     const no = ++state.blockCounter;
     const usedPdfNames = new Set();
@@ -330,18 +466,19 @@
     const legacyDocs = [];
     let ignored = 0;
 
-    for (const [path, zipObj] of files) {
+    for (const item of files) {
+      const path = item.path;
       if (isJunk(path)) continue;
       if (/\.docx$/i.test(path)) {
         const name = baseName(path);
         entries.push({
           id: `b${no}-f${entries.length}`,
-          path,                                                   // đường dẫn trong zip
+          path,                                                   // đường dẫn trong file nén
           name,                                                   // tên hiển thị
           outName: uniqueName(sanitizeFileName(stripExt(name)), '.pdf', usedPdfNames),  // tên PDF khi tải riêng lẻ
           pdfPath: path.replace(/\.docx$/i, '.pdf'),              // đường dẫn PDF trong zip đầu ra (giữ cấu trúc thư mục)
-          size: (zipObj._data && zipObj._data.uncompressedSize) || null,
-          zipObj,
+          size: item.size,
+          read: item.read,                                        // hàm đọc nội dung (ZIP và RAR dùng chung)
           status: 'pending',
           pdfBlob: null,
           error: '',
@@ -361,6 +498,7 @@
 
     return {
       no,
+      kind,                  // 'zip' | 'rar'
       name: file.name,
       folderName: uniqueName(sanitizeFileName(stripExt(file.name)), '', state.folderNames),
       size: file.size,
@@ -418,7 +556,7 @@
     entry.status = 'converting';
     updateRow(entry);
     try {
-      const buffer = await entry.zipObj.async('arraybuffer');
+      const buffer = await entry.read();
       entry.size = buffer.byteLength;
       updateRow(entry);
       const blob = await convertDocxToPdf(buffer, entry.name);
@@ -487,7 +625,7 @@
      9. ĐÓNG GÓI (Package) & TẢI VỀ (Download)
      --------------------------------------------------------- */
 
-  /** Gom các PDF của một lô thành <tên-zip-gốc>_PDF.zip (có cache). */
+  /** Gom các PDF của một lô thành <tên-file-nén-gốc>_PDF.zip (có cache). */
   async function packageBatch(batch) {
     if (batch.zipBlob) return batch.zipBlob;
     const zip = new JSZip();
@@ -607,6 +745,7 @@
       h('header', { class: 'block-head' },
         h('div', { class: 'block-top' },
           h('span', { class: 'block-num', text: `Block #${pad(batch.no)}` }),
+          h('span', { class: 'kind mono', 'data-kind': batch.kind, text: batch.kind.toUpperCase() }),
           ui.chip),
         h('h3', { class: 'block-title', title: batch.name, text: batch.name }),
         h('div', { class: 'block-meta mono' },
@@ -690,7 +829,7 @@
       notes.push(h('p', { class: 'note', text: `Đã bỏ qua ${batch.legacyDocs.length} file .doc cũ (chỉ hỗ trợ .docx): ${batch.legacyDocs.map(baseName).join(', ')}` }));
     }
     if (!total) {
-      notes.push(h('p', { class: 'note', text: 'Không tìm thấy file .docx nào trong ZIP này.' }));
+      notes.push(h('p', { class: 'note', text: 'Không tìm thấy file .docx nào trong file nén này.' }));
     }
     if (batch.ignored) {
       notes.push(h('p', { class: 'note note--info', text: `${batch.ignored} file khác (không phải Word) đã được bỏ qua.` }));
@@ -702,7 +841,7 @@
      11. THANH HÀNH ĐỘNG CHUNG VÀ CHẾ ĐỘ NHẬN KẾT QUẢ
      --------------------------------------------------------- */
   const MODE_HINT = {
-    zip: 'Nút "Tải tất cả" tạo một file ZIP tổng, mỗi lô nằm trong một thư mục mang tên ZIP gốc.',
+    zip: 'Nút "Tải tất cả" tạo một file ZIP tổng, mỗi lô nằm trong một thư mục mang tên file nén gốc.',
     direct: 'Nút "Tải tất cả" tải lần lượt từng file .pdf. Ở từng dòng bạn vẫn có nút tải riêng cho file đó.'
   };
 
@@ -741,7 +880,7 @@
     // Bỏ tham chiếu tới blob và zip để trình duyệt thu hồi bộ nhớ
     for (const batch of state.batches) {
       batch.zipBlob = null;
-      for (const entry of batch.entries) { entry.pdfBlob = null; entry.zipObj = null; entry.ui = null; }
+      for (const entry of batch.entries) { entry.pdfBlob = null; entry.read = null; entry.ui = null; }
     }
     state.batches = [];
     state.blockCounter = 0;
